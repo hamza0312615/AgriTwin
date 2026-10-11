@@ -27,7 +27,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.example.util.AppLanguageState
+import com.example.util.AppTtsManager
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Biotech
 import androidx.compose.material.icons.filled.Home
@@ -80,6 +83,7 @@ import com.example.ui.theme.SunlitBorder
 import com.example.ui.theme.SunlitSurface
 import com.example.ui.theme.TextSlateMuted
 import com.example.ui.theme.TextSlatePrimary
+import com.example.ui.theme.TextSlateSecondary
 
 enum class AgriScreen(
     val title: String,
@@ -104,13 +108,18 @@ class MainActivity : ComponentActivity() {
         // Monitor network connectivity and update NasaNetworkState
         setupNetworkMonitoring()
 
-        // Initialize local notification channel for crop disease risk alerts
+        // Initialize local notification channels
         com.example.util.DiseaseAlertNotificationManager.createNotificationChannel(this)
+        com.example.util.WeatherAlertNotificationManager.createNotificationChannel(this)
 
-        val targetScreen = if (intent?.getStringExtra("EXTRA_NAV_TARGET") == "FARM") {
-            AgriScreen.FARM
-        } else {
-            AgriScreen.HOME
+        // Initialize global Text-To-Speech engine
+        AppTtsManager.initialize(this)
+
+        val targetScreen = when (intent?.getStringExtra("EXTRA_NAV_TARGET")) {
+            "FARM" -> AgriScreen.FARM
+            "ALERTS" -> AgriScreen.ALERTS
+            "WATER" -> AgriScreen.WATER
+            else -> AgriScreen.HOME
         }
 
         setContent {
@@ -118,6 +127,11 @@ class MainActivity : ComponentActivity() {
                 AgriTwinApp(initialScreen = targetScreen)
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        AppTtsManager.shutdown()
     }
 
     private fun setupNetworkMonitoring() {
@@ -222,7 +236,7 @@ fun AgriTwinApp(initialScreen: AgriScreen = AgriScreen.HOME) {
                                 )
                             }
                             Text(
-                                text = "Climate-Twin Farming Intelligence",
+                                text = AppLanguageState.appSubtitle(),
                                 fontSize = 10.sp,
                                 color = TextSlateMuted,
                                 maxLines = 1
@@ -230,8 +244,30 @@ fun AgriTwinApp(initialScreen: AgriScreen = AgriScreen.HOME) {
                         }
                     }
 
-                    // Subtle Offline Status Indicator (appears when offline or NASA API calls fail)
-                    OfflineStatusChip(isOffline = NasaNetworkState.isOffline)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // EN / اردو Global Language Switcher Pill
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (AppLanguageState.isUrdu) AgriPrimaryContainer else SunlitBackground)
+                                .border(1.dp, if (AppLanguageState.isUrdu) AgriPrimaryFresh else SunlitBorder, RoundedCornerShape(16.dp))
+                                .clickable { AppLanguageState.toggleLanguage() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("btn_language_toggle_topbar")
+                        ) {
+                            Text(
+                                text = if (AppLanguageState.isUrdu) "اردو (UR)" else "EN / اردو",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (AppLanguageState.isUrdu) AgriPrimaryFresh else TextSlateSecondary
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Subtle Offline Status Indicator (appears when offline or NASA API calls fail)
+                        OfflineStatusChip(isOffline = NasaNetworkState.isOffline)
+                    }
                 }
             }
         },
@@ -246,19 +282,27 @@ fun AgriTwinApp(initialScreen: AgriScreen = AgriScreen.HOME) {
             ) {
                 AgriScreen.values().forEach { screen ->
                     val isSelected = currentScreen == screen
+                    val navLabel = when (screen) {
+                        AgriScreen.HOME -> AppLanguageState.navHome()
+                        AgriScreen.TWIN -> AppLanguageState.navTwin()
+                        AgriScreen.WATER -> AppLanguageState.navWater()
+                        AgriScreen.FARM -> AppLanguageState.navFarm()
+                        AgriScreen.DISEASE -> if (AppLanguageState.isUrdu) "امراض" else screen.title
+                        AgriScreen.ALERTS -> AppLanguageState.navAlerts()
+                    }
                     NavigationBarItem(
                         selected = isSelected,
                         onClick = { currentScreen = screen },
                         icon = {
                             Icon(
                                 imageVector = if (isSelected) screen.selectedIcon else screen.unselectedIcon,
-                                contentDescription = screen.title,
+                                contentDescription = navLabel,
                                 modifier = Modifier.size(21.dp)
                             )
                         },
                         label = {
                             Text(
-                                text = screen.title,
+                                text = navLabel,
                                 fontSize = 10.sp,
                                 fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                                 maxLines = 1

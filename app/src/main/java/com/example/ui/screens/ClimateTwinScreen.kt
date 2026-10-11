@@ -80,6 +80,7 @@ import com.example.ui.theme.SunlitBorder
 import com.example.ui.theme.TextSlateMuted
 import com.example.ui.theme.TextSlatePrimary
 import com.example.ui.theme.TextSlateSecondary
+import com.example.util.AppLanguageState
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -163,7 +164,7 @@ fun ClimateTwinScreen(
                 }
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Climate Twin",
+                    text = if (AppLanguageState.isUrdu) "کلائمیٹ ٹوئن (ہمزاد)" else "Climate Twin",
                     color = TextSlatePrimary,
                     fontSize = 21.sp,
                     fontWeight = FontWeight.ExtraBold

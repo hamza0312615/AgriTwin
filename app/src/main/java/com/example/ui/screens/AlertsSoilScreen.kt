@@ -39,12 +39,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import com.example.data.location.AppLocationManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,9 +60,23 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Water
+import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.ui.platform.LocalContext
 import com.example.data.model.AlertSeverity
 import com.example.data.model.WeatherAlert
 import com.example.data.network.NasaPowerRepository
+import com.example.util.WeatherAlertNotificationManager
+import com.example.util.WeatherAlertType
+import com.example.util.AppLanguageState
+import com.example.util.AppTtsManager
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VolumeOff
 import com.example.ui.components.DemoDataBadge
 import com.example.ui.components.HonestyStrip
 import com.example.ui.components.RequestUrlDebugBanner
@@ -151,24 +167,47 @@ fun AlertsSoilScreen(
     var selectedFieldIndex by remember { mutableIntStateOf(0) }
     val currentField = MOCK_FIELDS[selectedFieldIndex]
 
+    val context = LocalContext.current
     var weatherAlerts by remember { mutableStateOf<List<WeatherAlert>>(emptyList()) }
     var requestUrl by remember { mutableStateOf("") }
     var isLoadingAlerts by remember { mutableStateOf(false) }
     var alertsError by remember { mutableStateOf<String?>(null) }
     var showFormulaInfo by remember { mutableStateOf(false) }
     var showAllAlertsList by remember { mutableStateOf(false) }
+    var weatherAlertNotificationStatus by remember { mutableStateOf<String?>(null) }
+    var showNotificationSimPanel by remember { mutableStateOf(false) }
 
-    fun loadAlerts() {
+    val currentLocation by AppLocationManager.currentLocation.collectAsState()
+
+    fun loadAlerts(
+        lat: Double = currentLocation.latitude,
+        lon: Double = currentLocation.longitude
+    ) {
         coroutineScope.launch {
             isLoadingAlerts = true
             alertsError = null
 
-            val result = repository.fetchDailyDataWithResult(31.4187, 73.0791, daysCount = 30)
+            val result = repository.fetchDailyDataWithResult(lat, lon, daysCount = 30)
             if (result.isSuccess && result.getOrThrow().records.isNotEmpty()) {
                 val data = result.getOrThrow()
                 requestUrl = data.requestUrl
                 weatherAlerts = repository.deriveWeatherAlerts(data.records, data.requestUrl)
                 alertsError = null
+
+                // Check for critical weather changes: Extreme Heat, Heavy Rainfall, Gale Winds
+                val alertResult = WeatherAlertNotificationManager.checkAndNotifyCriticalWeather(
+                    context = context,
+                    farmName = currentField.name,
+                    records = data.records,
+                    cropName = "Wheat / Cotton"
+                )
+                if (alertResult.triggered) {
+                    weatherAlertNotificationStatus = if (alertResult.notificationSent) {
+                        "Local notification dispatched: ${alertResult.title}"
+                    } else {
+                        "Critical weather event detected: ${alertResult.title} (Enable notification permissions to receive system bar banners)"
+                    }
+                }
             } else {
                 alertsError = result.exceptionOrNull()?.message ?: "NASA POWER Daily API unreachable"
                 weatherAlerts = repository.deriveWeatherAlerts(emptyList())
@@ -177,8 +216,33 @@ fun AlertsSoilScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        loadAlerts()
+    LaunchedEffect(currentLocation.latitude, currentLocation.longitude) {
+        WeatherAlertNotificationManager.createNotificationChannel(context)
+        loadAlerts(currentLocation.latitude, currentLocation.longitude)
+    }
+
+    val isUrdu = AppLanguageState.isUrdu
+    val isSpeaking = AppTtsManager.isSpeaking
+
+    fun speakAlerts() {
+        val topAlert = weatherAlerts.firstOrNull { it.isLiveNasaDerived }
+        val textEn = if (topAlert != null) {
+            "AgriTwin NASA Alerts. ${topAlert.title}. ${topAlert.description}. Recommended action: ${topAlert.suggestedAction}"
+        } else {
+            "AgriTwin NASA Alerts. Normal thresholds observed across 30 days. No severe weather hazards detected."
+        }
+        val textUr = if (topAlert != null) {
+            "ایگری ٹوئن الرٹس۔ ${topAlert.title}۔ ${topAlert.description}۔ تجویز کردہ اقدام: ${topAlert.suggestedAction}"
+        } else {
+            "ایگری ٹوئن الرٹس۔ گزشتہ تیس دنوں کے دوران معمول کے مطابق مشاہدات ہیں۔ کوئی شدید موسمی خطرہ نہیں پایا گیا۔"
+        }
+        AppTtsManager.speak(
+            context = context,
+            textEn = textEn,
+            textUr = textUr,
+            isUrdu = isUrdu,
+            utteranceId = "alerts_speech"
+        )
     }
 
     PullToRefreshBox(
@@ -218,7 +282,7 @@ fun AlertsSoilScreen(
                     }
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Alerts & Soil Health",
+                        text = if (isUrdu) "موسمی الرٹس اور زمین" else "Alerts & Soil Health",
                         color = TextSlatePrimary,
                         fontSize = 21.sp,
                         fontWeight = FontWeight.ExtraBold
@@ -226,12 +290,38 @@ fun AlertsSoilScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Notification Bell with green indicator dot
-                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    // Voice Readout (TTS) for alerts
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable { speakAlerts() }
+                            .testTag("btn_speak_alerts"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                            contentDescription = if (isUrdu) "الرٹس سنیں" else "Listen to Alerts",
+                            tint = if (isSpeaking) Color(0xFF16A34A) else TextSlatePrimary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    // Notification Bell with green indicator dot (interactive toggle for test alert trigger)
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable { showNotificationSimPanel = !showNotificationSimPanel }
+                            .testTag("btn_toggle_notification_panel"),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Notifications,
                             contentDescription = "Notifications",
-                            tint = TextSlatePrimary,
+                            tint = if (showNotificationSimPanel) Color(0xFF16A34A) else TextSlatePrimary,
                             modifier = Modifier.size(24.dp)
                         )
                         Box(
@@ -259,6 +349,241 @@ fun AlertsSoilScreen(
                             tint = Color(0xFF16A34A),
                             modifier = Modifier.size(20.dp)
                         )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Live Weather Notification Status Banner
+            AnimatedVisibility(visible = weatherAlertNotificationStatus != null) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .testTag("banner_weather_alert_notification"),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF0FDF4)),
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF86EFAC))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFDCFCE7)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsActive,
+                                contentDescription = "Active Alert",
+                                tint = Color(0xFF16A34A),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Local Weather Alert Active",
+                                color = Color(0xFF14532D),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = weatherAlertNotificationStatus ?: "",
+                                color = Color(0xFF166534),
+                                fontSize = 11.5.sp,
+                                lineHeight = 15.sp
+                            )
+                        }
+                        IconButton(
+                            onClick = { weatherAlertNotificationStatus = null },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Text("✕", color = Color(0xFF15803D), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Interactive Notification Testing Panel
+            AnimatedVisibility(visible = showNotificationSimPanel) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 14.dp)
+                        .testTag("panel_notification_simulation"),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Campaign,
+                                    contentDescription = "Alerts",
+                                    tint = Color(0xFFDC2626),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Simulate Weather Hazard Alerts",
+                                    color = TextSlatePrimary,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = "Test Local Notifications",
+                                color = Color(0xFF0284C7),
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Test instant local push notifications triggered when live NASA telemetry breaches safety thresholds:",
+                            color = TextSlateSecondary,
+                            fontSize = 11.5.sp,
+                            lineHeight = 15.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Button 1: Extreme Heat (>42°C)
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFFFEF2F2))
+                                    .border(1.dp, Color(0xFFFCA5A5), RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        val sent = WeatherAlertNotificationManager.sendSimulatedAlert(
+                                            context = context,
+                                            type = WeatherAlertType.EXTREME_HEAT,
+                                            farmName = currentField.name,
+                                            cropName = "Wheat"
+                                        )
+                                        weatherAlertNotificationStatus = if (sent) {
+                                            "Extreme Heat Alert (43°C) pushed to Android notification tray!"
+                                        } else {
+                                            "Extreme Heat Alert triggered (Grant notification permission to view in tray)"
+                                        }
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.LocalFireDepartment,
+                                        contentDescription = "Heat",
+                                        tint = Color(0xFFDC2626),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Heat 43°C",
+                                        color = Color(0xFFB91C1C),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            // Button 2: Heavy Rain (>50mm)
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFFEFF6FF))
+                                    .border(1.dp, Color(0xFF93C5FD), RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        val sent = WeatherAlertNotificationManager.sendSimulatedAlert(
+                                            context = context,
+                                            type = WeatherAlertType.HEAVY_RAINFALL,
+                                            farmName = currentField.name,
+                                            cropName = "Cotton"
+                                        )
+                                        weatherAlertNotificationStatus = if (sent) {
+                                            "Heavy Rainfall Alert (58 mm) pushed to Android notification tray!"
+                                        } else {
+                                            "Heavy Rainfall Alert triggered (Grant notification permission to view in tray)"
+                                        }
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.WaterDrop,
+                                        contentDescription = "Rain",
+                                        tint = Color(0xFF2563EB),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Rain 58mm",
+                                        color = Color(0xFF1D4ED8),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            // Button 3: Gale Wind
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFFF8FAFC))
+                                    .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        val sent = WeatherAlertNotificationManager.sendSimulatedAlert(
+                                            context = context,
+                                            type = WeatherAlertType.GALE_WIND,
+                                            farmName = currentField.name,
+                                            cropName = "Sugarcane"
+                                        )
+                                        weatherAlertNotificationStatus = if (sent) {
+                                            "Gale Wind Alert (48 km/h) pushed to Android notification tray!"
+                                        } else {
+                                            "Gale Wind Alert triggered (Grant notification permission to view in tray)"
+                                        }
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Air,
+                                        contentDescription = "Wind",
+                                        tint = Color(0xFF475569),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Wind 48km/h",
+                                        color = Color(0xFF334155),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

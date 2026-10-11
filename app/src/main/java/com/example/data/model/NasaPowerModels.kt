@@ -226,5 +226,18 @@ data class WeeklySatelliteReport(
     val diseaseRiskLevel: DiseaseRiskLevel = DiseaseRiskLevel.LOW,
     val dailyRecords: List<DailyRainfallRecord>,
     val isLiveReport: Boolean,
-    val requestUrl: String
+    val requestUrl: String,
+    val soilMoisturePercent: Double = 34.0, // NASA GLDAS / POWER root zone volumetric soil moisture (0-100%)
+    val soilMoistureStatus: String = "Adequate", // Deficit (<25%), Adequate (25-45%), Saturated (>45%)
+    val irrigationRequirementMm: Double = 18.0, // Net weekly crop water requirement in mm
+    val gldasDataSource: String = "NASA GLDAS-2.1 / POWER Noah LSM",
+    // Historical Climate Comparison (Same 7-Day Period Previous Year)
+    val historicalDailyRecords: List<DailyRainfallRecord> = emptyList(),
+    val historicalYearLabel: String = "2025",
+    val historicalTotalRainfallMm: Double = 0.0,
+    val historicalAvgTempC: Double = 0.0,
+    val historicalMaxTempC: Double = 0.0,
+    val yoyRainfallDeltaMm: Double = 0.0,
+    val yoyTempDeltaC: Double = 0.0,
+    val historicalTrendAnalysis: String = "Historical baseline aligned with multi-year seasonal norm."
 )

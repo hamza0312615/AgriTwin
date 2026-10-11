@@ -22,6 +22,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SatelliteAlt
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VolumeOff
+import com.example.util.AppLanguageState
+import com.example.util.AppTtsManager
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,15 +41,18 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import com.example.data.location.AppLocationManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -104,13 +112,18 @@ fun WaterDashboardScreen(
     var isLoadingDaily by remember { mutableStateOf(false) }
     var dailyError by remember { mutableStateOf<String?>(null) }
 
-    fun loadData() {
+    val currentLocation by AppLocationManager.currentLocation.collectAsState()
+
+    fun loadData(
+        lat: Double = currentLocation.latitude,
+        lon: Double = currentLocation.longitude
+    ) {
         coroutineScope.launch {
             isLoadingDaily = true
             dailyError = null
 
             // Query NASA POWER Daily API (parameters: T2M, PRECTOTCORR, WS2M) for 14-day window
-            val result = repository.fetchDailyDataWithResult(31.4187, 73.0791, daysCount = 14)
+            val result = repository.fetchDailyDataWithResult(lat, lon, daysCount = 14)
             if (result.isSuccess && result.getOrThrow().records.isNotEmpty()) {
                 val data = result.getOrThrow()
                 dailyRecords = data.records
@@ -134,8 +147,24 @@ fun WaterDashboardScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        loadData()
+    val context = LocalContext.current
+    val isUrdu = AppLanguageState.isUrdu
+    val isSpeaking = AppTtsManager.isSpeaking
+
+    fun speakIrrigationAdvice(item: IrrigationAdvice) {
+        val textEn = "Water Dashboard Advisory. ${item.headline}. ${item.recommendationSummary}"
+        val textUr = "پانی کا مشورہ۔ ${item.headline}۔ ${item.recommendationSummary}"
+        AppTtsManager.speak(
+            context = context,
+            textEn = textEn,
+            textUr = textUr,
+            isUrdu = isUrdu,
+            utteranceId = "water_advice_speech"
+        )
+    }
+
+    LaunchedEffect(currentLocation.latitude, currentLocation.longitude) {
+        loadData(currentLocation.latitude, currentLocation.longitude)
     }
 
     PullToRefreshBox(
@@ -161,13 +190,13 @@ fun WaterDashboardScreen(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Water Dashboard",
+                    text = if (isUrdu) "پانی کا تجزیہ (واٹر ڈیش بورڈ)" else "Water Dashboard",
                     color = TextSlatePrimary,
                     fontSize = 22.sp,
                     fontWeight = FontWeight.ExtraBold
                 )
                 Text(
-                    text = "NASA POWER Precipitation & AQUORA Satellite Hydrology",
+                    text = if (isUrdu) "ناسا پاور بارش اور ایکوورا سیٹلائٹ ہائیڈرولوجی" else "NASA POWER Precipitation & AQUORA Satellite Hydrology",
                     color = TextSlateMuted,
                     fontSize = 12.sp
                 )
@@ -233,7 +262,26 @@ fun WaterDashboardScreen(
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                        DemoDataBadge()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSpeaking) SkyBlueContainer else Color.Transparent)
+                                    .clickable { speakIrrigationAdvice(advice) }
+                                    .testTag("btn_speak_water_advice"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                    contentDescription = if (isUrdu) "مشورہ سنیں" else "Listen to Advice",
+                                    tint = if (isSpeaking) SkyBlueText else TextSlateSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            DemoDataBadge()
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))

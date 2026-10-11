@@ -119,4 +119,30 @@ class ExampleRobolectricTest {
         )
         assertTrue("Subsequent HIGH risk should not re-escalate", !repeatHighResult.escalatedToHigh)
     }
+
+    @Test
+    fun `AppLocationManager updates state and validates manual coordinates bounds`() {
+        val manager = com.example.data.location.AppLocationManager
+
+        // Valid manual coordinates
+        val success = manager.setManualCoordinates(30.1575, 71.5249, "Multan Farm")
+        assertTrue("Valid coordinates should succeed", success)
+        assertEquals(30.1575, manager.currentLocation.value.latitude, 0.0001)
+        assertEquals(71.5249, manager.currentLocation.value.longitude, 0.0001)
+        assertEquals("Multan Farm", manager.currentLocation.value.displayName)
+
+        // Invalid latitude (> 90)
+        val invalidLat = manager.setManualCoordinates(95.0, 71.5249)
+        assertTrue("Invalid latitude should fail", !invalidLat)
+
+        // Invalid longitude (> 180)
+        val invalidLon = manager.setManualCoordinates(30.0, 195.0)
+        assertTrue("Invalid longitude should fail", !invalidLon)
+
+        // Preset district update
+        val lahore = com.example.data.model.PRESET_DISTRICTS.first { it.id == "lahore" }
+        manager.setFromPresetDistrict(lahore)
+        assertEquals(31.5204, manager.currentLocation.value.latitude, 0.0001)
+        assertEquals(74.3587, manager.currentLocation.value.longitude, 0.0001)
+    }
 }

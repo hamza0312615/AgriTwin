@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
 import android.annotation.SuppressLint
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -36,7 +39,9 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
+import com.example.data.location.AppLocationManager
 import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -45,17 +50,29 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.SatelliteAlt
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Terrain
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.material.icons.filled.TrendingDown
+import androidx.compose.material.icons.filled.CompareArrows
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.ui.platform.LocalContext
 import com.example.data.model.DiseaseRiskLevel
+import com.example.util.AppLanguageState
+import com.example.util.AppTtsManager
 import com.example.util.DiseaseAlertNotificationManager
+import com.example.util.ReportPdfExporter
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -116,7 +133,6 @@ import com.example.ui.theme.TextSlateMuted
 import com.example.ui.theme.TextSlatePrimary
 import com.example.ui.theme.TextSlateSecondary
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 /**
  * Screen F: My Farm (Headline v3 feature).
@@ -141,6 +157,31 @@ fun MyFarmScreen(
         hasNotificationPermission = isGranted
     }
 
+    // Add Farm Form State
+    var newFarmName by remember { mutableStateOf("") }
+    var newFarmCrop by remember { mutableStateOf("Wheat") }
+    var newFarmLat by remember { mutableStateOf("31.4200") }
+    var newFarmLon by remember { mutableStateOf("73.1000") }
+    val cropOptions = listOf("Wheat", "Cotton", "Rice", "Maize", "Sugarcane")
+
+    // Location permission launcher for GPS autofill
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                      permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+            coroutineScope.launch {
+                val res = AppLocationManager.fetchDeviceLocation(context)
+                if (res.isSuccess) {
+                    val loc = res.getOrThrow()
+                    newFarmLat = String.format(Locale.US, "%.4f", loc.latitude)
+                    newFarmLon = String.format(Locale.US, "%.4f", loc.longitude)
+                }
+            }
+        }
+    }
+
     // Local notification feedback message
     var notificationAlertMessage by remember { mutableStateOf<String?>(null) }
 
@@ -149,33 +190,67 @@ fun MyFarmScreen(
     var selectedFarm by remember { mutableStateOf(DEFAULT_FARMS.first()) }
     var showAddFarmDialog by remember { mutableStateOf(false) }
 
-    // Date stepper for NASA GIBS satellite passes (recent 7 days)
-    val gibsDates = remember {
-        listOf(
-            "2026-10-08",
-            "2026-10-07",
-            "2026-10-06",
-            "2026-10-05",
-            "2026-10-04",
-            "2026-10-03",
-            "2026-10-02"
-        )
+    // Date stepper for NASA GIBS satellite passes (dynamically generated from yesterday back 7 days)
+    val gibsDates: List<String> = remember {
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        (1..7).map { daysAgo ->
+            val cal = Calendar.getInstance()
+            cal.add(Calendar.DAY_OF_YEAR, -daysAgo)
+            dateFormat.format(cal.time)
+        }
+    }
+    val yesterdayFallback = remember {
+        val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(cal.time)
     }
     var selectedDateIndex by remember { mutableIntStateOf(0) }
-    val currentGibsDate = gibsDates[selectedDateIndex]
+    val currentGibsDate: String = gibsDates.getOrElse(selectedDateIndex) { gibsDates.firstOrNull() ?: yesterdayFallback }
+
+    val isUrdu = AppLanguageState.isUrdu
+    val isSpeaking = AppTtsManager.isSpeaking
+
+    fun speakReport(report: WeeklySatelliteReport) {
+        val textEn = buildString {
+            append("Weekly Satellite Report for ${report.farmName}. ")
+            append("Crop parcel: ${selectedFarm.crop}. ")
+            append("Seven-day rainfall is ${String.format(Locale.UK, "%.1f", report.totalRainfallMm)} millimetres, ")
+            append("compared to ${String.format(Locale.UK, "%.1f", report.historicalTotalRainfallMm)} millimetres in ${report.historicalYearLabel}. ")
+            append("Average temperature is ${String.format(Locale.UK, "%.1f", report.avgTempC)} degrees Celsius. ")
+            append("Root zone soil moisture is ${String.format(Locale.UK, "%.1f", report.soilMoisturePercent)} percent, status is ${report.soilMoistureStatus}. ")
+            append("Net irrigation requirement is ${String.format(Locale.UK, "%.0f", report.irrigationRequirementMm)} millimetres. ")
+            append("Agronomic advice: ${report.irrigationAdvice}")
+        }
+
+        val statusUr = when {
+            report.soilMoisturePercent < 22.0 -> "کمی کا شکار"
+            report.soilMoisturePercent <= 42.0 -> "مناسب اور متوازن"
+            else -> "سیراب اور زیادہ نمی"
+        }
+        val textUr = buildString {
+            append("ہفتہ وار سیٹلائٹ رپورٹ برائے ${report.farmName}۔ ")
+            append("فصل: ${selectedFarm.crop}۔ ")
+            append("گزشتہ سات دنوں کی بارش ${String.format(Locale.UK, "%.1f", report.totalRainfallMm)} ملی میٹر رہی، ")
+            append("جبکہ پچھلے سال ${report.historicalYearLabel} میں ${String.format(Locale.UK, "%.1f", report.historicalTotalRainfallMm)} ملی میٹر تھی۔ ")
+            append("اوسط درجہ حرارت ${String.format(Locale.UK, "%.1f", report.avgTempC)} ڈگری سینٹی گریڈ ہے۔ ")
+            append("زمین کی نمی ${String.format(Locale.UK, "%.1f", report.soilMoisturePercent)} فیصد ہے یعنی $statusUr۔ ")
+            append("آبپاشی کی ضرورت ${String.format(Locale.UK, "%.0f", report.irrigationRequirementMm)} ملی میٹر ہے۔ ")
+            append("زرعی مشورہ: ${report.irrigationAdvice}")
+        }
+
+        AppTtsManager.speak(
+            context = context,
+            textEn = textEn,
+            textUr = textUr,
+            isUrdu = isUrdu,
+            utteranceId = "weekly_report_tts"
+        )
+    }
 
     // Weekly Report State
     var weeklyReport by remember { mutableStateOf<WeeklySatelliteReport?>(null) }
     var isGeneratingReport by remember { mutableStateOf(false) }
     var reportError by remember { mutableStateOf<String?>(null) }
     var isFullReportExpanded by remember { mutableStateOf(false) }
-
-    // Add Farm Form State
-    var newFarmName by remember { mutableStateOf("") }
-    var newFarmCrop by remember { mutableStateOf("Wheat") }
-    var newFarmLat by remember { mutableStateOf("31.4200") }
-    var newFarmLon by remember { mutableStateOf("73.1000") }
-    val cropOptions = listOf("Wheat", "Cotton", "Rice", "Maize", "Sugarcane")
 
     fun generateReportForFarm(farm: SavedFarm) {
         coroutineScope.launch {
@@ -396,6 +471,41 @@ fun MyFarmScreen(
                         }
 
                         Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Coordinates (NASA Grid):", color = TextSlateSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            androidx.compose.material3.TextButton(
+                                onClick = {
+                                    if (AppLocationManager.hasLocationPermission(context)) {
+                                        coroutineScope.launch {
+                                            val res = AppLocationManager.fetchDeviceLocation(context)
+                                            if (res.isSuccess) {
+                                                val loc = res.getOrThrow()
+                                                newFarmLat = String.format(Locale.US, "%.4f", loc.latitude)
+                                                newFarmLon = String.format(Locale.US, "%.4f", loc.longitude)
+                                            }
+                                        }
+                                    } else {
+                                        locationPermissionLauncher.launch(
+                                            arrayOf(
+                                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                                Manifest.permission.ACCESS_COARSE_LOCATION
+                                            )
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.height(36.dp).testTag("btn_autofill_gps_farm")
+                            ) {
+                                Icon(imageVector = Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(14.dp), tint = AgriPrimaryFresh)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Autofill GPS", fontSize = 11.5.sp, color = AgriPrimaryFresh, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(
@@ -684,13 +794,82 @@ fun MyFarmScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "7-Day Summary · ${report.farmName}",
-                                color = TextSlatePrimary,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            NasaLiveBadge()
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "7-Day Summary · ${report.farmName}",
+                                    color = TextSlatePrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Crop: ${selectedFarm.crop.replaceFirstChar { it.uppercase() }}",
+                                    color = TextSlateMuted,
+                                    fontSize = 10.5.sp
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Voice Readout (TTS) for Weekly Report & Soil Moisture
+                                OutlinedButton(
+                                    onClick = { speakReport(report) },
+                                    modifier = Modifier
+                                        .height(30.dp)
+                                        .testTag("button_listen_report_tts"),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = if (isSpeaking) AgriPrimaryContainer else Color.Transparent,
+                                        contentColor = AgriPrimaryFresh
+                                    ),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isSpeaking) AgriPrimaryFresh else SunlitBorder),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                        contentDescription = if (isUrdu) "رپورٹ سنیں" else "Listen to Report",
+                                        tint = if (isSpeaking) AgriPrimaryFresh else TextSlateSecondary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (isSpeaking) (if (isUrdu) "روکیں" else "Stop") else (if (isUrdu) "سنیں" else "Listen"),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSpeaking) AgriPrimaryFresh else TextSlateSecondary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                OutlinedButton(
+                                    onClick = {
+                                        val file = ReportPdfExporter.generateAndSharePdf(context, report, selectedFarm)
+                                        if (file != null) {
+                                            notificationAlertMessage = "📄 PDF Report generated: ${file.name}. Share dialog opened."
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .height(30.dp)
+                                        .testTag("button_export_report_pdf"),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AgriPrimary),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, AgriPrimaryFresh),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PictureAsPdf,
+                                        contentDescription = "Export PDF",
+                                        tint = AlertRed,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Export PDF",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = AgriPrimary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                NasaLiveBadge()
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
@@ -773,6 +952,292 @@ fun MyFarmScreen(
                             Column {
                                 Text("Irrigation Directive:", color = SkyBlueText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 Text(text = report.irrigationAdvice, color = TextSlateSecondary, fontSize = 11.5.sp, lineHeight = 16.sp)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // NASA GLDAS / POWER Root Zone Soil Moisture & Net Irrigation Requirement Card
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("card_soil_moisture_gldas"),
+                            colors = CardDefaults.cardColors(containerColor = SunlitSurfaceSubtle),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SunlitBorder)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.WaterDrop,
+                                            contentDescription = "Soil Moisture",
+                                            tint = SkyBlue,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Root Zone Soil Moisture (NASA GLDAS)",
+                                            color = TextSlatePrimary,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(
+                                                if (report.soilMoisturePercent < 22.0) AlertRedBg
+                                                else if (report.soilMoisturePercent <= 42.0) AgriPrimaryContainer
+                                                else SkyBlueContainer
+                                            )
+                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = report.soilMoistureStatus,
+                                            color = if (report.soilMoisturePercent < 22.0) AlertRed
+                                            else if (report.soilMoisturePercent <= 42.0) AgriPrimary
+                                            else SkyBlueText,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "${String.format(Locale.UK, "%.1f", report.soilMoisturePercent)}%",
+                                            color = TextSlatePrimary,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                        Text(
+                                            text = "0–100 cm profile saturation",
+                                            color = TextSlateMuted,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = "${String.format(Locale.UK, "%.0f", report.irrigationRequirementMm)} mm",
+                                            color = if (report.irrigationRequirementMm > 0) SkyBlueText else AgriPrimary,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                        Text(
+                                            text = "Net weekly crop water demand",
+                                            color = TextSlateMuted,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Progress bar visualizing moisture saturation
+                                LinearProgressIndicator(
+                                    progress = { (report.soilMoisturePercent / 100f).toFloat().coerceIn(0f, 1f) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                    color = if (report.soilMoisturePercent < 22.0) SunGold else AgriPrimaryFresh,
+                                    trackColor = SunlitBorder
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Year-over-Year Historical Climate Overlay & Trend Analysis Card
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("card_historical_climate_overlay"),
+                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SunlitBorder),
+                            shape = RoundedCornerShape(12.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.CompareArrows,
+                                            contentDescription = "Historical Comparison",
+                                            tint = AgriPrimary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Historical Climate Trend Overlay",
+                                            color = TextSlatePrimary,
+                                            fontSize = 13.5.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(AgriPrimaryContainer.copy(alpha = 0.5f))
+                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "vs ${report.historicalYearLabel} (Same 7d)",
+                                            color = AgriPrimary,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                // Comparative Metric Grid (Live 2026 vs Last Year 2025)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    // Rainfall comparison box
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(SunlitSurfaceSubtle)
+                                            .padding(10.dp)
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "Rainfall Comparison",
+                                                color = TextSlateMuted,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Row(verticalAlignment = Alignment.Bottom) {
+                                                Text(
+                                                    text = "${String.format(Locale.UK, "%.1f", report.totalRainfallMm)}",
+                                                    color = SkyBlueText,
+                                                    fontSize = 16.sp,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                                Text(
+                                                    text = " vs ${String.format(Locale.UK, "%.1f", report.historicalTotalRainfallMm)} mm",
+                                                    color = TextSlateSecondary,
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(
+                                                    imageVector = if (report.yoyRainfallDeltaMm >= 0) Icons.Default.TrendingUp else Icons.Default.TrendingDown,
+                                                    contentDescription = "Rain Delta",
+                                                    tint = if (report.yoyRainfallDeltaMm >= 0) SkyBlueText else AlertRed,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(3.dp))
+                                                Text(
+                                                    text = "${String.format(Locale.UK, "%+.1f", report.yoyRainfallDeltaMm)} mm YoY",
+                                                    color = if (report.yoyRainfallDeltaMm >= 0) SkyBlueText else AlertRed,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Temperature comparison box
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(SunlitSurfaceSubtle)
+                                            .padding(10.dp)
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "Avg Temp Comparison",
+                                                color = TextSlateMuted,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Row(verticalAlignment = Alignment.Bottom) {
+                                                Text(
+                                                    text = "${String.format(Locale.UK, "%.1f", report.avgTempC)}°",
+                                                    color = SunGoldText,
+                                                    fontSize = 16.sp,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                                Text(
+                                                    text = " vs ${String.format(Locale.UK, "%.1f", report.historicalAvgTempC)}°C",
+                                                    color = TextSlateSecondary,
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(
+                                                    imageVector = if (report.yoyTempDeltaC >= 0) Icons.Default.TrendingUp else Icons.Default.TrendingDown,
+                                                    contentDescription = "Temp Delta",
+                                                    tint = if (report.yoyTempDeltaC > 1.5) AlertRed else SunGoldText,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(3.dp))
+                                                Text(
+                                                    text = "${String.format(Locale.UK, "%+.1f", report.yoyTempDeltaC)}°C YoY",
+                                                    color = if (report.yoyTempDeltaC > 1.5) AlertRed else SunGoldText,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Agronomic Trend Analysis Sentence
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(SunlitSurfaceSubtle)
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = "Trend Analysis",
+                                        tint = AgriPrimary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = report.historicalTrendAnalysis,
+                                        color = TextSlateSecondary,
+                                        fontSize = 11.sp,
+                                        lineHeight = 15.sp
+                                    )
+                                }
                             }
                         }
 
@@ -997,28 +1462,69 @@ fun MyFarmScreen(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .background(Color(0xFFE2E8F0))
-                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        .padding(horizontal = 8.dp, vertical = 7.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("Date", color = TextSlatePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                    Text("Rain (mm)", color = SkyBlueText, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                    Text("Temp (°C)", color = SunGoldText, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                    Text("Wind (m/s)", color = TextSlateSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                    Text("Day / Date", color = TextSlatePrimary, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.1f))
+                                    Text("Rain (Live vs '25)", color = SkyBlueText, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.3f))
+                                    Text("Temp (Live vs '25)", color = SunGoldText, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.3f))
+                                    Text("Wind (2m)", color = TextSlateSecondary, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.9f))
                                 }
 
-                                // Table Rows
+                                // Table Rows with Historical Overlay
                                 report.dailyRecords.forEachIndexed { idx, day ->
+                                    val histDay = report.historicalDailyRecords.getOrNull(idx)
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .background(if (idx % 2 == 0) Color.White else SunlitSurfaceSubtle)
                                             .padding(horizontal = 8.dp, vertical = 6.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(day.dateString, color = TextSlatePrimary, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                                        Text(String.format(Locale.UK, "%.1f", day.rainfallMm), color = SkyBlueText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                        Text(String.format(Locale.UK, "%.1f", day.maxTempC ?: 0.0), color = SunGoldText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                        Text(String.format(Locale.UK, "%.1f", day.windSpeedMs ?: 0.0), color = TextSlateSecondary, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                                        Text(day.dateString, color = TextSlatePrimary, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1.1f))
+                                        
+                                        // Rainfall: live vs last year
+                                        Column(modifier = Modifier.weight(1.3f)) {
+                                            Text(
+                                                text = "${String.format(Locale.UK, "%.1f", day.rainfallMm)} mm",
+                                                color = SkyBlueText,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (histDay != null) {
+                                                Text(
+                                                    text = "Hist: ${String.format(Locale.UK, "%.1f", histDay.rainfallMm)} mm",
+                                                    color = TextSlateMuted,
+                                                    fontSize = 9.sp
+                                                )
+                                            }
+                                        }
+
+                                        // Temperature: live vs last year
+                                        Column(modifier = Modifier.weight(1.3f)) {
+                                            Text(
+                                                text = "${String.format(Locale.UK, "%.1f", day.maxTempC ?: 0.0)}°C",
+                                                color = SunGoldText,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (histDay != null) {
+                                                Text(
+                                                    text = "Hist: ${String.format(Locale.UK, "%.1f", histDay.maxTempC ?: 0.0)}°C",
+                                                    color = TextSlateMuted,
+                                                    fontSize = 9.sp
+                                                )
+                                            }
+                                        }
+
+                                        // Wind
+                                        Text(
+                                            text = "${String.format(Locale.UK, "%.1f", day.windSpeedMs ?: 0.0)} m/s",
+                                            color = TextSlateSecondary,
+                                            fontSize = 10.5.sp,
+                                            modifier = Modifier.weight(0.9f)
+                                        )
                                     }
                                 }
                             }
@@ -1029,25 +1535,72 @@ fun MyFarmScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Generate/Refresh button
-            Button(
-                onClick = { generateReportForFarm(selectedFarm) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(44.dp)
-                    .testTag("button_generate_weekly_report"),
-                enabled = !isGeneratingReport,
-                colors = ButtonDefaults.buttonColors(containerColor = AgriPrimaryFresh),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                if (isGeneratingReport) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Querying NASA POWER Live Telemetry...", fontSize = 13.sp, color = Color.White)
-                } else {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Generate", tint = Color.White, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Generate Fresh Weekly Report", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            if (report != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = { generateReportForFarm(selectedFarm) },
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(44.dp)
+                            .testTag("button_generate_weekly_report"),
+                        enabled = !isGeneratingReport,
+                        colors = ButtonDefaults.buttonColors(containerColor = AgriPrimaryFresh),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        if (isGeneratingReport) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Querying...", fontSize = 12.sp, color = Color.White)
+                        } else {
+                            Icon(imageVector = Icons.Default.Refresh, contentDescription = "Generate", tint = Color.White, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Refresh Report", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val file = ReportPdfExporter.generateAndSharePdf(context, report, selectedFarm)
+                            if (file != null) {
+                                notificationAlertMessage = "📄 PDF Report generated: ${file.name}. Share dialog opened."
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1.2f)
+                            .height(44.dp)
+                            .testTag("button_export_pdf_large"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AgriPrimaryFresh),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AgriPrimary)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = "Share", tint = AgriPrimary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Export PDF", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = AgriPrimary)
+                    }
+                }
+            } else {
+                Button(
+                    onClick = { generateReportForFarm(selectedFarm) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("button_generate_weekly_report"),
+                    enabled = !isGeneratingReport,
+                    colors = ButtonDefaults.buttonColors(containerColor = AgriPrimaryFresh),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    if (isGeneratingReport) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Querying NASA POWER Live Telemetry...", fontSize = 13.sp, color = Color.White)
+                    } else {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Generate", tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Generate Fresh Weekly Report", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
                 }
             }
 
@@ -1101,10 +1654,14 @@ fun GibsLeafletMapView(
             // NASA GIBS MODIS Terra TrueColor WMTS Tile Layer (Keyless)
             var gibsUrl = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/$date/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg';
             
-            L.tileLayer(gibsUrl, {
+            var tileLayer = L.tileLayer(gibsUrl, {
               maxZoom: 9,
               attribution: 'NASA Earthdata / GIBS &copy; OpenStreetMap'
-            }).addTo(map);
+            });
+            tileLayer.on('tileerror', function(error) {
+              console.warn('GIBS Tile request error:', (error && error.url) ? error.url : 'tile network error');
+            });
+            tileLayer.addTo(map);
 
             // Farm Boundary circle
             var farmCircle = L.circle([$latitude, $longitude], {
@@ -1139,7 +1696,54 @@ fun GibsLeafletMapView(
                 settings.domStorageEnabled = true
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
-                webViewClient = WebViewClient()
+                settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+                webChromeClient = object : android.webkit.WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                        android.util.Log.d(
+                            "GIBS_Map",
+                            "JS Console [${consoleMessage?.messageLevel()}]: ${consoleMessage?.message()} (${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()})"
+                        )
+                        return true
+                    }
+                }
+                webViewClient = object : WebViewClient() {
+                    override fun onReceivedError(
+                        view: WebView?,
+                        errorCode: Int,
+                        description: String?,
+                        failingUrl: String?
+                    ) {
+                        super.onReceivedError(view, errorCode, description, failingUrl)
+                        android.util.Log.e("GIBS_Map", "Map load error [$errorCode]: $description at $failingUrl")
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?,
+                        error: android.webkit.WebResourceError?
+                    ) {
+                        super.onReceivedError(view, request, error)
+                        android.util.Log.e("GIBS_Map", "Map resource error [${error?.errorCode}]: ${error?.description} at ${request?.url}")
+                    }
+
+                    override fun onReceivedHttpError(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?,
+                        errorResponse: android.webkit.WebResourceResponse?
+                    ) {
+                        super.onReceivedHttpError(view, request, errorResponse)
+                        android.util.Log.w("GIBS_Map", "HTTP error ${errorResponse?.statusCode} at ${request?.url}")
+                    }
+
+                    override fun onReceivedSslError(
+                        view: WebView?,
+                        handler: android.webkit.SslErrorHandler?,
+                        error: android.net.http.SslError?
+                    ) {
+                        android.util.Log.e("GIBS_Map", "SSL Error: ${error?.primaryError} at ${error?.url}")
+                        handler?.cancel()
+                    }
+                }
                 addJavascriptInterface(object {
                     @JavascriptInterface
                     fun onLocationPicked(lat: Double, lon: Double) {
