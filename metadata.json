@@ -1,0 +1,6 @@
+{
+  "name": "AgriTwin",
+  "description": "Climate-Twin Farming Intelligence by team DevTech for NASA Space Apps Challenge 2026. Climate matching, NASA POWER live data, water intelligence, crop disease analysis, and storm alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
